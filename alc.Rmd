@@ -1,0 +1,356 @@
+---
+title: "Literature review classification"
+output: 
+  # beamer_presentation: default # https://bookdown.org/yihui/rmarkdown/beamer-presentation.html
+   powerpoint_presentation: default # https://bookdown.org/yihui/rmarkdown/powerpoint-presentation.html
+  # html_document: default
+  # pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE, tidy = TRUE) # Parameters for chunks
+# Loading Quanteda and readText to analyze unstructured text
+library(quanteda)
+library(readtext)
+library(xlsx)
+
+# Loading Todyverse to work with tables
+library(tidyverse)
+
+# Plotly to show results
+# Source: https://plot.ly/r/table/
+library(plotly)
+
+# Decision tree for the classification function
+library(tree)
+
+#Random forest algorithm
+library(randomForest)
+
+# Sample testing for decision tree
+# Source: https://www.r-bloggers.com/how-to-implement-random-forests-in-r/
+library(rpart)
+library(caret)
+library(e1071)
+
+```
+
+# Introduction
+
+The purpose of this paper is to determine how to automatically classify literature review genres.
+
+# Methodology
+
+We use the five step process of knowledge-discovery in database.
+
+* Data Selection  
+* Data Pre-processing
+* Data Formatting
+* Data mining
+* Interpretation
+
+```{r corpus}
+
+### Abstracts from an CSV file
+articles_info <- readtext("overall.csv", 
+                     text_field = "Abstract_text"
+                     )
+
+articles <- corpus(articles_info)
+
+### PDFs
+
+# PDFDocs <- readtext("corpus_PDF/*.pdf", 
+#                      text_field = "texts", 
+#                      docvarsfrom = "filenames", # Extract variables from the title of the text
+#                     dvsep = "_"
+#                     )
+# 
+# names(PDFDocs) <- c("document", "text", "type", "article_ID","authors") 
+# #Create corpus dataframe from extracted texts
+# # This is needed to deal with different languages
+# evidences_PDF <- corpus(PDFDocs)
+
+
+### Loading the data from txt files
+# # Source: https://tutorials.quanteda.io/import-data/multiple-files/
+# 
+# reflDocs <- readtext("corpus/*.txt",
+#                      text_field = "texts",
+#                      docvarsfrom = "filenames", # Extract variables from the title of the text
+#                     dvsep = "_"
+#                     )
+# 
+# #Rename extracted variables
+# # The first 2 variables should not be changed
+# 
+# names(reflDocs) <- c("document", "text", "Type", "Article_ID","Authors")
+# 
+# #Create corpus dataframe from extracted texts
+# # This is needed to deal with different languages
+# 
+# evidences <- corpus(reflDocs)
+
+```
+
+# Step 01: Data Selection
+
+We start by performing text mining on `r length(articles_info$Authors)` abstracts of articles identified by Templier and Paré (2018). Link: https://www.tandfonline.com/doi/abs/10.1080/0960085X.2017.1398880
+
+A polarized wordcloud allows to graphically assess whether there are word associated to one specific genre in the literature.
+
+```{r wordcloud generator, out.width = '75%'}
+# create a function to create WordClouds
+myWordCloud <- function (dfm, myGroup){
+# This function remove stopwords and punctuations, stem the words, 
+# store the results in a frequency matrix and create a wordcloud
+corpus(dfm)%>% # 
+  dfm(groups = myGroup, remove = stopwords("english"), remove_punct = TRUE, stem = TRUE)%>% # Frequency matrix
+  textplot_wordcloud(comparison = TRUE, max_words = 75) # Wordcloud graph
+}
+
+# World cloud for the different TYPES of literature review
+set.seed(1)
+
+myWordCloud(articles_info, "Type")
+
+```
+
+# Step 02: Data Pre-processing 
+
+We start by associating to each abstract a set of information, and by analysis the frequency of appeareance of each word in the text.
+
+```{r}
+# Get list of docs and words and Convert to dataframe
+# https://rdrr.io/cran/quanteda/man/as.data.frame.dfm.html
+classifTable <- articles %>%
+  dfm(groups = "Reference", remove = stopwords("english"), remove_punct = TRUE, stem = TRUE)%>%
+  convert(to ="data.frame")
+
+colnames(classifTable)[1] <- "Reference"
+
+head(classifTable[,1:3], 1)
+```
+
+
+# Step 03: Data transformation
+
+To perform an automatic classification, we add the type of review as a dependent variable.
+
+```{r classification_Table}
+
+myClassificationTable <- function(evidences, myTypes){
+# Get list of docs and words and Convert to dataframe
+# https://rdrr.io/cran/quanteda/man/as.data.frame.dfm.html
+classifTable <- evidences %>%
+  dfm(groups = "Reference", remove = stopwords("english"), remove_punct = TRUE, stem = TRUE)%>%
+  convert(to ="data.frame")
+
+colnames(classifTable)[1] <- "Reference"
+
+
+# Add type in the first column
+classification <- data.frame(
+  "Type" = myTypes$Type,
+  classifTable[,-1] # Removing the title and the id of documents
+)
+
+classification
+}
+
+# Get initial types of docs and Make a column with types of docs in the right order
+myTypes <- data.frame(
+                  "Reference"= articles$documents$Reference, 
+                  "Type"= articles$documents$Type
+                  )%>%
+                  left_join(classifTable, by = "Reference")
+
+classification <- myClassificationTable(articles, myTypes)
+
+head(classification[,1:6])
+```
+
+# Step 04: Data mining
+
+We use the decision tree algorithm to automatically extracts classification rules.
+Other classification algorithms have been shown to be more effective for natural language processing, but here we are interested in the ability to extract a set of rules, which can be easily understood by humans.
+
+```{r decision_tree_image, out.width = '75%'}
+# decision tree (removing the "document" column to extract rules)
+Classification_rules <- tree(Type ~.-Type, classification[,-2]) 
+
+# Showing decision tree
+plot(Classification_rules) 
+text(Classification_rules)
+
+Classification_rules
+```
+
+```{r misclassification}
+misclassification <- as.numeric(format(round(          summary(Classification_rules)[7]$misclass[1]/summary(Classification_rules)[7]$misclass[2]          , 2), nsmall = 2))
+
+summary(Classification_rules)
+```
+The misclassification rate is `r misclassification * 100`%.
+
+## Predicting power of the decision tree algorithm
+```{r}
+# Source: https://www.datacamp.com/community/tutorials/decision-trees-R
+
+set.seed(101)
+train=sample(1:nrow(classification), nrow(classification)/2)
+
+tree.abstracts = tree(Type~., classification[train,-2])
+plot(tree.abstracts)
+text(tree.abstracts, pretty=0)
+
+tree.pred = predict(tree.abstracts, classification[-train,-2], type="class")
+
+with(classification[-train,-2], table(tree.pred, Type))
+
+summary(tree.pred)
+
+```
+
+
+
+```{r decision_tree_02, include=FALSE, eval=FALSE}
+
+model_dt = train(Type ~., 
+                data = classification[,-2], 
+                method = "rpart"
+                )
+
+model_dt_1 = predict(model_dt, data = classification[,-2])
+
+table(model_dt_1, classification$Type)
+
+mean(model_dt_1 == classification$Type)
+
+```
+
+## Random Forest
+As a complement, we run the random forest algorithm, which tests mutliple decision trees. 
+```{r random_forest}
+
+set.seed(1)
+
+rf.model1 <- randomForest(Type ~., 
+                       data = classification[train,-2], 
+                       ntree = 500, 
+                       mtry = 500,
+                       importance = TRUE
+                       )
+rf.model1
+
+rf.pred = predict(rf.model1, classification[-train,-2], type="class")
+
+with(classification[-train,-2], table(tree.pred, Type))
+
+
+```
+
+
+```{r random_forest_graphs}
+
+head(importance(model1))
+
+varImpPlot(model1)
+```
+
+
+# Model 2: The classification done with 4 Types set by Rowe (2014) does not improve the results
+
+```{r}
+myWordCloud(articles_info, "Type_Rowe")
+
+
+# Get initial types of docs and Make a column with types of docs in the right order
+myTypes_Rowe <- data.frame(
+                  "Reference"= articles$documents$Reference, 
+                  "Type"= articles$documents$Type_Rowe
+                  )%>%
+                  left_join(classifTable, by = "Reference")
+
+classification_Rowe <- myClassificationTable(articles, myTypes_Rowe)
+
+# decision tree (removing the "document" column to extract rules)
+Classification_rules_Rowe <- tree(Type ~.-Type, classification_Rowe[,-2]) 
+
+# Showing decision tree
+plot(Classification_rules_Rowe) 
+text(Classification_rules_Rowe)
+
+summary(Classification_rules)
+
+model_Rowe <- randomForest(Type ~., 
+                       data = classification_Rowe[,-2], 
+                       ntree = 500, 
+                       mtry = 500,
+                       importance = TRUE
+                       )
+model_Rowe
+
+```
+
+
+
+# Step 05: interpretation
+
+To be done
+
+
+\newpage
+
+# Appendix:
+
+```{r result list, include=FALSE, eval=FALSE}
+evidences <- articles
+
+META <- corpus_subset(evidences, Type=="Meta")
+CRITICAL <- corpus_subset(evidences, Type=="Critical")
+DESCRIPTIVE <- corpus_subset(evidences, Type=="Descriptive")
+QUALITATIVE <- corpus_subset(evidences, Type=="Qualitative")
+THEORETICAL <- corpus_subset(evidences, Type=="Theoretical")
+NARRATIVE <- corpus_subset(evidences, Type=="Narrative")
+```
+
+A more detailed analysis show differences between the words networks of
+* Meta-Reviews
+* Critical
+* Descriptive
+* Qualitative
+* Theoretical
+* Narrative
+
+```{r textNetwork, out.width = '75%', include=FALSE, eval=FALSE}
+## Detailed analysis of the overall Word network (min_freq=.95)
+
+myWordNetwork <- function (dfm, myTermFreq, myMaxFreq, myMinFreq){
+dfm %>%
+  dfm(remove = stopwords("english"), stem = TRUE, remove_punct = TRUE) %>%
+  dfm_select(min_nchar = 5) %>%
+  dfm_trim(min_termfreq = myTermFreq, max_freq = myMaxFreq)%>%  
+  fcm()%>%
+  textplot_network(min_freq = myMinFreq)
+}
+
+# Parameters for word network visualization
+myTermFreq <- 10 
+myMaxFreq <- 0.7 
+myMinFreq <- 0.9
+
+# myWordNetwork(evidences, myTermFreq, myMaxFreq, myMinFreq)
+
+# par(mfrow=c(3,2))
+
+myWordNetwork(META, myTermFreq, myMaxFreq, myMinFreq)
+myWordNetwork(CRITICAL, myTermFreq, myMaxFreq, myMinFreq)
+myWordNetwork(DESCRIPTIVE, myTermFreq, myMaxFreq, myMinFreq)
+myWordNetwork(QUALITATIVE, myTermFreq, myMaxFreq, myMinFreq)
+myWordNetwork(THEORETICAL, myTermFreq, myMaxFreq, myMinFreq)
+myWordNetwork(NARRATIVE, myTermFreq, myMaxFreq, myMinFreq)
+```
+
+
+
